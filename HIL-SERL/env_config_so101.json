@@ -1,0 +1,123 @@
+{
+    "type": "gym_manipulator",
+    "robot": {
+        "type": "so101_follower_end_effector",
+        "port": "/dev/ttyACM1",
+        "urdf_path": "/home/xuanyuanj/lerobot/src/lerobot/robots/so101_follower/SO101/so101_new_calib.urdf",
+        "target_frame_name": "gripper_frame_link",
+        "cameras": {
+            "front": {
+                "type": "opencv",
+                "index_or_path": "/dev/video4",
+                "height": 240,
+                "width": 424,
+                "fps": 15
+            },
+            "wrist": {
+                "type": "opencv",
+                "index_or_path": "/dev/video10",
+                "height": 240,
+                "width": 424,
+                "fps": 15
+            }
+        },
+        "end_effector_bounds": {
+            "min": [
+                    0.14,
+                    -0.03,
+                    0.02
+                ],
+                "max": [
+                    0.40,
+                    0.14,
+                    0.09
+                ]
+        },
+        "end_effector_step_sizes": {
+            "x": 0.1,
+            "y": 0.1,
+            "z": 0.1
+        }
+    },
+    "teleop": {
+        "type": "so101_leader",
+        "port": "/dev/ttyACM0",
+        "use_degrees": true,
+        "id": "my_awesome_leader_arm"
+    },
+    "wrapper": {
+        "display_cameras": false,
+        "add_joint_velocity_to_observation": true,
+        "add_current_to_observation": true,
+        "add_ee_pose_to_observation": true,
+        "crop_params_dict": null,
+        "resize_size": [
+            128,
+            128
+        ],
+        "control_time_s": 200.0,
+        "use_gripper": true,
+        "gripper_quantization_threshold": null,
+        "gripper_penalty": -0.02,
+        "gripper_penalty_in_reward": false,
+        "fixed_reset_joint_positions": [
+            0.0,
+            0.0,
+            0.0,
+            90.0,
+            0.0,
+            0.0
+        ],
+        "reset_time_s": 2.5,
+        "control_mode": "leader"
+    },
+    "name": "real_robot",
+    "mode": "record",
+    "repo_id": "xuanyuanj/so101_touch_block",
+    "dataset_root": "/home/xuanyuanj/lerobot/datasets_0822/so101_touch_block",
+    "task": "touch_block",
+    "num_episodes": 60,
+    "episode": 0,
+    "pretrained_policy_name_or_path": null,
+    "device": "cuda",
+    "push_to_hub": false,
+    "fps": 8,
+    "features": {
+        "observation.images.front": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                128,
+                128
+            ]
+        },
+        "observation.images.wrist": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                128,
+                128
+            ]
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [
+                21
+            ]
+        },
+        "action": {
+            "type": "ACTION",
+            "shape": [
+                3
+            ]
+        }
+    },
+    "features_map": {
+        "observation.images.front": "observation.images.front",
+        "observation.images.wrist": "observation.images.wrist",
+        "observation.state": "observation.state",
+        "action": "action"
+    },
+    
+  "number_of_steps_after_success": 15
+}
