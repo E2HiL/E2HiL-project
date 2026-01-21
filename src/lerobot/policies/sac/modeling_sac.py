@@ -406,6 +406,144 @@ class SACPolicy(
         actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
         return actor_loss
     
+    def _covariance(self, x: Tensor, y: Tensor, dim: int = -1, eps: float = 1e-8) -> Tensor:
+        """
+        Cov(x,y) along `dim` (population version, i.e., mean-centered).
+        x,y: same shape
+        returns: x/y reduced on dim
+        """
+        x_mean = x.mean(dim=dim, keepdim=True)
+        y_mean = y.mean(dim=dim, keepdim=True)
+        return ((x - x_mean) * (y - y_mean)).mean(dim=dim)
+
+    def compute_loss_actor_with_cov_loss(
+            self,
+            observations,
+            observation_features: Tensor | None = None,
+        ) -> dict:
+            """
+            Returns:
+                dict with:
+                - loss_actor (Tensor): Standard SAC actor loss used for backprop.
+                - policy_entropy (float): Estimated policy entropy for logging only.
+                - entropy_change_pred (float): Entropy change estimate derived from covariance (sign flipped; >0 suggests entropy is decreasing).
+                - cov_logp_softadv (float): Covariance between log-prob and soft advantage (unsigned, for comparison).
+            """
+            
+            K: int = 8,                      # MC samples per state (paper uses sampling over π(a|s))
+            q_low: float = 0.05,             # lower percentile for |c|
+            q_high: float = 0.90,            # upper percentile for |c|
+            eps: float = 1e-8,
+            
+            actions_pi, log_probs, dist = self.actor(observations, observation_features)
+            
+            # ===== Entropy metrics and trend estimate =====
+            # Policy entropy (positive value): H = -E[log pi]
+            policy_entropy_t = (-log_probs).mean().detach()  # H_t
+
+            # ============================================================
+            # 1) Compute per-sample lt for Eq.(12): lt = Q(s,a) - α logπ(a|s)
+            #    (use the same sampled action actions_pi for the actor update)
+            # ============================================================
+    
+            q_preds = self.critic_forward(
+                observations=observations,
+                actions=actions_pi,
+                use_target=False,
+                observation_features=observation_features,
+            )
+      
+            min_q_preds = q_preds.min(dim=0)[0] # shape [B]
+            
+            lt = (min_q_preds - self.temperature * log_probs) # shape [B] == Q - α logπ
+            
+            # ============================================================
+            # 2) Influence estimation (Eq.(10)):
+            #    c(s,a) = - η Cov( logπ(a|s), π(a|s) * Asoft(s,a) )
+            #    We omit η -> trend/indicator
+            #
+            #    Need Asoft(s,a)=g(s,a)-Vπ(s), with g(s,a)=Q(s,a)-αlogπ(a|s)
+            #    Vπ(s)=E_a'[g(s,a')] approximated by K samples for the same s.
+            # ============================================================
+            # Sample K actions per state: shape [K,B,act_dim]
+    
+            # Sample K actions per state: shape [K,B,act_dim]
+            a_k = dist.rsample((K,))  # shape [K, B, action_dim]
+            # logπ(a_k|s): [K,B]
+            logp_k = dist.log_prob(a_k)  # shape [K, B]
+            
+            if logp_k.dim() > 2:
+                logp_k = logp_k.sum(-1)  # sum over action_dim if needed
+                
+            # Q(s,a_k): critic_forward expects [B,act_dim], so flatten K*B
+            K_, B = logp_k.shape
+            a_k_flat = a_k.reshape(K_ * B, *a_k.shape[2:])
+            obs_rep = observations.repeat_interleave(K_, dim=0)
+            feat_rep = None if observation_features is None else observation_features.repeat_interleave(K_, dim=0)
+
+            q_k_preds = self.critic_forward(
+                observations=obs_rep,
+                actions=a_k_flat,
+                use_target=False,
+                observation_features=feat_rep,
+            )  # [num_critics, K*B]
+            min_q_k = q_k_preds.min(dim=0)[0].reshape(K_, B)  # [K,B]
+            
+            g_k = (min_q_k - self.temperature * logp_k)
+            V_s = g_k.mean(dim=0, keepdim=True)
+            Asoft_k = g_k - V_s
+            
+            pi_k = torch.exp(logp_k).clamp_max(1e6)           # π(a|s) for continuous policy (density proxy)
+            y_k = pi_k * Asoft_k                              # [K,B]
+            cov_per_state = self._covariance(logp_k, y_k, dim=0)   # Cov over actions for each state -> [B]
+            
+            c = (-cov_per_state).detach()                     # [B]  omit η, stop-gradient like paper
+            c_abs = c.abs()
+            
+            
+            # ============================================================
+            # 3) Entropy-bounded selection (Eq.(11)):
+            #    I(s,a)=1{|c| in [ℓ,u]}, bounds from batch percentiles
+            # ============================================================
+            # torch.quantile works on float tensors
+            l_bound = torch.quantile(c_abs, q_low).detach()
+            u_bound = torch.quantile(c_abs, q_high).detach()
+            
+            I = ((c_abs >= l_bound) & (c_abs <= u_bound)).to(lt.dtype)  # [B] {0,1} float for weighting
+            keep = I.sum()
+            keep_ratio = (keep / (I.numel() + eps)).detach()
+            
+            # ============================================================
+            # 4) Actor loss Eq.(12): - sum(I*lt) / (sum(I)+eps)
+            # ============================================================
+            actor_loss = -(I * lt).sum() / (keep + eps)
+            
+            # optional: delta entropy logging
+            if not hasattr(self, "_last_policy_entropy"):
+                self._last_policy_entropy = None
+            if self._last_policy_entropy is None:
+                delta_h = 0.0
+            else:
+                delta_h = float(policy_entropy_t.item() - self._last_policy_entropy)
+            self._last_policy_entropy = float(policy_entropy_t.item())
+            
+            
+            return {
+                "loss_actor": actor_loss,
+                "policy_entropy_in_actor": float(policy_entropy_t.item()),
+                "policy_entropy_delta": float(delta_h),
+
+                # covariance / influence stats
+                "cov_batch_mean": float(cov_per_state.mean().detach().item()),
+                "c_abs_mean": float(c_abs.mean().item()),
+                "c_abs_bounds": (float(l_bound.item()), float(u_bound.item())),
+                "mask_keep_ratio": float(keep_ratio.item()),
+
+                # debug (optional, can be heavy)
+                "c_per_sample": c.detach().cpu().numpy().tolist(),
+                "I_per_sample": I.detach().cpu().numpy().tolist(),
+            }
+    
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
         self.normalize_inputs = nn.Identity()
@@ -931,7 +1069,7 @@ class Policy(nn.Module):
         # Compute log_probs
         log_probs = dist.log_prob(actions)
 
-        return actions, log_probs, means
+        return actions, log_probs, dist
 
     def get_features(self, observations: torch.Tensor) -> torch.Tensor:
         """Get encoded features from observations"""
