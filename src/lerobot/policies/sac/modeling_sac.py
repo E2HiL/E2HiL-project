@@ -475,32 +475,54 @@ class SACPolicy(
             if logp_k.dim() > 2:
                 logp_k = logp_k.sum(-1)  # sum over action_dim if needed
                 
-            # Q(s,a_k): critic_forward expects [B,act_dim], so flatten K*B
-            K_, B = logp_k.shape
-            a_k_flat = a_k.reshape(K_ * B, *a_k.shape[2:])
-            obs_rep = observations.repeat_interleave(K_, dim=0)
-            feat_rep = None if observation_features is None else observation_features.repeat_interleave(K_, dim=0)
+            a_k = a_k.permute(1, 0, 2) # shape [B, K, action_dim]
+            logp_k = logp_k.permute(1, 0) # shape [B, K]
+                
+            # Dimensions
+            B_sz, K_sz, D_sz = a_k.shape
+            
+            # [Step C] Critic Evaluation for K samples
+            # Flatten actions to [B*K, D]
+            a_k_flat = a_k.reshape(B_sz * K_sz, D_sz)
+            
+            # Expand Observations to [B*K, ...]
+            # Order: [s0, s0, ..., s1, s1, ...] (Matches a_k_flat)
+            obs_rep = observations.repeat_interleave(K_sz, dim=0)
+            feat_rep = None 
+            if observation_features is not None:
+                feat_rep = observation_features.repeat_interleave(K_sz, dim=0)
 
+            # Get Q values
             q_k_preds = self.critic_forward(
                 observations=obs_rep,
                 actions=a_k_flat,
                 use_target=False,
                 observation_features=feat_rep,
-            )  # [num_critics, K*B]
-            min_q_k = q_k_preds.min(dim=0)[0].reshape(K_, B)  # [K,B]
+            ) 
+            min_q_k_flat = q_k_preds.min(dim=0)[0]  # [B*K]
+            min_q_k = min_q_k_flat.view(B_sz, K_sz) # Restore [B, K]
             
-            g_k = (min_q_k - self.temperature * logp_k)
-            V_s = g_k.mean(dim=0, keepdim=True)
-            Asoft_k = g_k - V_s
+            # [Step D] Calculate Covariance Terms
+            # g(s, a') = Q - alpha * log_pi
+            g_k = min_q_k - self.temperature * logp_k   # [B, K]
             
-            pi_k = torch.exp(logp_k).clamp_max(1e6)           # π(a|s) for continuous policy (density proxy)
-            y_k = pi_k * Asoft_k                              # [K,B]
-            cov_per_state = self._covariance(logp_k, y_k, dim=0)   # Cov over actions for each state -> [B]
+            # Soft Advantage: A_soft = g - Mean(g)
+            # V(s) approx via mean over K
+            V_s = g_k.mean(dim=1, keepdim=True)         # [B, 1]
+            Asoft_k = g_k - V_s                         # [B, K] (Already centered)
             
-            c = (-cov_per_state).detach()                     # [B]  omit η, stop-gradient like paper
+            # Density term: pi(a|s)
+            # Use clamp to avoid numerical explosion in Covariance
+            pi_k = torch.exp(logp_k).clamp(max=1e6)     # [B, K]
+            
+            # Terms for Covariance: X = log_pi, Y = pi * A_soft
+            y_k = pi_k * Asoft_k                        # [B, K]
+            
+            # Calculate Covariance along K dimension (dim=1)
+            # c(s) = - Cov(...)
+            cov_per_state = self._covariance(logp_k, y_k, dim=1) # [B]
+            c = (-cov_per_state).detach()
             c_abs = c.abs()
-            
-            
             # ============================================================
             # 3) Entropy-bounded selection (Eq.(11)):
             #    I(s,a)=1{|c| in [ℓ,u]}, bounds from batch percentiles
