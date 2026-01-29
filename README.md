@@ -8,7 +8,7 @@
 [![pytorch](https://img.shields.io/badge/PyTorch_2.2%2B-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/get-started/locally/)
 [![license](https://img.shields.io/badge/License-Apache_2.0-gree.svg?labelColor=gray)](https://www.apache.org/licenses/LICENSE-2.0)
 
-**[[LeRobot](https://github.com/huggingface/lerobot)] | [[Docs](docs/README.md)] | [[Website](https://e2hil.github.io/)]**
+**[[Arxiv](https://arxiv.org/abs/2601.19969)] | [[Website](https://e2hil.github.io/)]**
 </div>
 
 Online reinforcement learning (RL) with human-in-the-loop guidance is a powerful paradigm for training robots in complex real-world manipulation tasks, but existing HiL-RL methods often require substantial human interventions to converge. We propose **E2HiL**, a sample-efficient real-world HiL-RL framework that regulates policy entropy dynamics and improves convergence with fewer interventions via entropy-guided sample selection. E2HiL uses entropy dynamics to measure each sample's impact, prunes shortcut or low-impact samples with entropy-bounded clipping, and keeps policy updates within a stable entropy range for more efficient use of human intervention data.
